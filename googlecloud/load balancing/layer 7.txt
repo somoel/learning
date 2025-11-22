@@ -1,0 +1,96 @@
+L7
+
+INSTANCIAS 
+  gcloud compute instances create www1 \
+    --zone=Zone \
+    --tags=network-lb-tag \
+    --machine-type=e2-small \
+    --image-family=debian-11 \
+    --image-project=debian-cloud \
+    --metadata=startup-script='#!/bin/bash
+      apt-get update
+      apt-get install apache2 -y
+      service apache2 restart
+      echo "
+<h3>Web Server: www1</h3>" | tee /var/www/html/index.html'
+
+REGLA DE FIREWALL
+gcloud compute firewall-rules create www-firewall-network-lb \
+    --target-tags network-lb-tag --allow tcp:80
+
+
+PLANTILLA DE INSTANCIAS
+gcloud compute instance-templates create lb-backend-template \
+   --region=Region \
+   --network=default \
+   --subnet=default \
+   --tags=allow-health-check \
+   --machine-type=e2-medium \
+   --image-family=debian-11 \
+   --image-project=debian-cloud \
+   --metadata=startup-script='#!/bin/bash
+     apt-get update
+     apt-get install apache2 -y
+     a2ensite default-ssl
+     a2enmod ssl
+     vm_hostname="$(curl -H "Metadata-Flavor:Google" \
+     http://169.254.169.254/computeMetadata/v1/instance/name)"
+     echo "Page served from: $vm_hostname" | \
+     tee /var/www/html/index.html
+     systemctl restart apache2'
+
+GRUPO DE INSTANCIAS ADMINISTRADOS
+gcloud compute instance-groups managed create lb-backend-group \
+   --template=lb-backend-template --size=2 --zone=Zone
+
+PERMITIR HEALTH CHECK
+gcloud compute firewall-rules create fw-allow-health-check \
+  --network=default \
+  --action=allow \
+  --direction=ingress \
+  --source-ranges=130.211.0.0/22,35.191.0.0/16 \
+  --target-tags=allow-health-check \
+  --rules=tcp:80
+
+IP EXTERNA PARA EL BALANCEADOR
+gcloud compute addresses create lb-ipv4-1 \
+  --ip-version=IPV4 \
+  --global
+
+LEER IP EXTERNA
+gcloud compute addresses describe lb-ipv4-1 \
+  --format="get(address)" \
+  --global
+
+CREAR HEALTH CHECK
+gcloud compute health-checks create http http-basic-check \
+  --port 80
+
+CREAR EL SERVICIO BACKEND
+gcloud compute backend-services create web-backend-service \
+  --protocol=HTTP \
+  --port-name=http \
+  --health-checks=http-basic-check \
+  --global
+
+AGREGAR EL GRUPO DE INSTANCIAS AL BACKEND
+gcloud compute backend-services add-backend web-backend-service \
+  --instance-group=lb-backend-group \
+  --instance-group-zone=Zone \
+  --global
+
+CREAR EL MAPEO DE URLS
+gcloud compute url-maps create web-map-http \
+    --default-service web-backend-service
+
+CREAR PROXY HTTP 
+gcloud compute target-http-proxies create http-lb-proxy \
+    --url-map web-map-http
+
+LA REGLA DE REENVIO (EL LB)
+gcloud compute forwarding-rules create http-content-rule \
+   --address=lb-ipv4-1\
+   --global \
+   --target-http-proxy=http-lb-proxy \
+   --ports=80
+
